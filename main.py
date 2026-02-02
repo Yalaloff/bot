@@ -216,7 +216,7 @@ def schedule_daily_posts() -> None:
     schedule.clear("evening")
 
     t_morning = random_time_in_range(8, 9)
-    t_day = random_time_in_range(12, 14)
+    t_day = random_time_in_range(15, 16)
     t_evening = random_time_in_range(18, 19)
 
     schedule.every().day.at(t_morning).do(lambda: create_and_send_post("morning", t_morning)).tag("morning")
