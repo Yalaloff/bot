@@ -3,6 +3,7 @@ import time
 import json
 import random
 import threading
+import traceback
 from datetime import datetime
 from typing import List, Dict, Any
 
@@ -36,14 +37,12 @@ TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL_CHAT = os.getenv("OPENAI_MODEL_CHAT", "gpt-4o-mini")
 OPENAI_MODEL_IMAGE = os.getenv("OPENAI_MODEL_IMAGE", "gpt-image-1")
-
-# 🔐 Секрет для ручной публикации (Render Environment)
 MANUAL_PUBLISH_TOKEN = os.getenv("MANUAL_PUBLISH_TOKEN", "")
 
 LOG_FILE = "posts_log.json"
 
 if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID or not OPENAI_API_KEY:
-    raise ValueError("Не заданы TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID или OPENAI_API_KEY")
+    raise ValueError("❌ Не заданы TELEGRAM_BOT_TOKEN / TELEGRAM_CHANNEL_ID / OPENAI_API_KEY")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -56,143 +55,71 @@ def load_logs() -> List[Dict[str, Any]]:
         return []
     try:
         with open(LOG_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return data if isinstance(data, list) else []
-    except Exception as e:
-        print("Ошибка чтения логов:", e)
+            return json.load(f)
+    except Exception:
         return []
 
 
 def save_logs(logs: List[Dict[str, Any]]) -> None:
-    try:
-        with open(LOG_FILE, "w", encoding="utf-8") as f:
-            json.dump(logs, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print("Ошибка записи логов:", e)
+    with open(LOG_FILE, "w", encoding="utf-8") as f:
+        json.dump(logs, f, ensure_ascii=False, indent=2)
 
 
 def log_post(slot: str, text: str, image_url: str, time_planned: str) -> None:
     logs = load_logs()
     logs.append({
-        "timestamp": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+        "timestamp": datetime.now().isoformat(),
         "slot": slot,
-        "text": text,
-        "image_url": image_url,
         "time_planned": time_planned,
         "time_sent": datetime.now().strftime("%H:%M"),
-        "manual": time_planned.startswith("manual"),
     })
     save_logs(logs)
 
 
-def get_last_texts_for_slot(slot: str, limit: int = 3) -> List[str]:
-    logs = load_logs()
-    slot_logs = [l for l in logs if l.get("slot") == slot]
-    return [l.get("text", "") for l in slot_logs[-limit:] if l.get("text")]
-
-
 # =========================
-# WEEKDAY TOPICS
+# WEEKDAY TOPIC
 # =========================
 def get_weekday_topic() -> str:
-    weekday = datetime.now().weekday()
-    topics = {
-        0: "Сегодня понедельник — эмоции во снах и чувства, спрятанные за образами.",
-        1: "Сегодня вторник — природные символы: вода, лес, животные и их подсказки.",
-        2: "Сегодня среда — архетипы: дом, коридоры, комнаты, двери.",
-        3: "Сегодня четверг — знаки и предчувствия, сны-подсказки.",
-        4: "Сегодня пятница — повторяющиеся и навязчивые сны.",
-        5: "Сегодня суббота — энергия сна и внутренние потоки.",
-        6: "Сегодня воскресенье — восстановление и медитативные образы.",
-    }
-    return topics.get(weekday, "")
+    topics = [
+        "Эмоции во снах и скрытые чувства",
+        "Природные символы: вода, лес, животные",
+        "Архетипы: дом, коридоры, двери",
+        "Знаки и предчувствия",
+        "Повторяющиеся сны",
+        "Энергия сна и подсознания",
+        "Восстановление и медитативные образы",
+    ]
+    return f"Сегодня тема: {topics[datetime.now().weekday()]}"
 
 
 # =========================
-# TEXT GENERATION (эзотерика)
+# TEXT GENERATION
 # =========================
 def generate_post_text(slot: str) -> str:
-    slot_prompt = {
-        "morning": "Утренний мягкий эзотерический пост о снах как ночных посланиях.",
-        "day": "Дневной пост о символах во снах, знаках и подсознательных подсказках.",
-        "evening": "Вечерний спокойный пост-ритуал перед погружением в сон.",
-    }.get(slot, "Эзотерический пост о снах.")
-
-    system_message = (
-        "Ты — автор эзотерического Telegram-канала о толковании снов. "
-        "Пиши мягко, красиво, без страшилок. Символы, энергия, знаки, Вселенная — "
-        "но понятным и тёплым языком."
-    )
-
-    history = ""
-    last_texts = get_last_texts_for_slot(slot)
-    if last_texts:
-        history = "\n\nНе повторяй идеи этих недавних постов:\n" + "\n---\n".join(last_texts)
-
-    user_message = (
-        f"{slot_prompt}\n\n"
-        f"{get_weekday_topic()}\n\n"
-        "Объём 500–900 символов. Без хэштегов. 1–3 эмодзи внутри текста."
-        f"{history}"
-    )
+    print(f"[GEN] Генерируем текст для слота: {slot}", flush=True)
 
     r = client.chat.completions.create(
         model=OPENAI_MODEL_CHAT,
         messages=[
-            {"role": "system", "content": system_message},
-            {"role": "user", "content": user_message},
+            {"role": "system", "content": "Ты эзотерический автор, пишешь мягко и красиво."},
+            {"role": "user", "content": f"{get_weekday_topic()}. Объём 500–700 символов."},
         ],
-        max_tokens=700,
-        temperature=0.95,
+        max_tokens=600,
+        temperature=0.9,
     )
 
     text = r.choices[0].message.content.strip()
-
-    footer = (
-        "\n\n—\n"
-        "Хочешь получить личное послание из своих снов? "
-        "Отправь сон боту @whatdreams_bot — он аккуратно расшифрует его 🌙"
-    )
-
-    full = text + footer
-    if len(full) > 1024:
-        allowed = 1024 - len(footer) - 3
-        full = text[:allowed].rstrip() + "..." + footer
-
-    return full
+    return text + "\n\n—\nНапиши свой сон 👉 @whatdreams_bot 🌙"
 
 
 # =========================
 # IMAGE GENERATION
 # =========================
 def generate_image_url(slot: str) -> str:
-    weekday = datetime.now().weekday()
-    weekday_style = {
-        0: "эмоции, сияние сердца, мягкие волны энергии",
-        1: "вода, лес, силуэты животных, мистический туман",
-        2: "дом, коридоры, двери, архетипичные формы",
-        3: "созвездия, знаки, ночное небо",
-        4: "повторяющиеся спирали, циклы, лестницы",
-        5: "энергетические потоки, аура, свет",
-        6: "спокойная вода, луна, медитативный пейзаж",
-    }.get(weekday, "мистический пейзаж сна")
-
-    base_style = {
-        "morning": "рассвет, мягкое пробуждение, тёплые тона",
-        "day": "ясные контуры, символы сна, лёгкий сюрреализм",
-        "evening": "ночь, звёзды, глубокие оттенки",
-    }.get(slot, "атмосфера сна")
-
-    prompt = (
-        "Иллюстрация для эзотерического Telegram-канала о толковании снов: "
-        f"{weekday_style}, {base_style}. "
-        "Без текста, без надписей, без логотипов."
-    )
-
+    print("[GEN] Генерируем изображение…", flush=True)
     img = client.images.generate(
         model=OPENAI_MODEL_IMAGE,
-        prompt=prompt,
-        n=1,
+        prompt="Мистическая иллюстрация сна, луна, символы, без текста",
         size="1024x1024",
     )
     return img.data[0].url
@@ -202,137 +129,87 @@ def generate_image_url(slot: str) -> str:
 # TELEGRAM SEND
 # =========================
 def send_photo_to_telegram(image_url: str, caption: str) -> None:
+    print(f"[TG] Отправка в канал {TELEGRAM_CHANNEL_ID}", flush=True)
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
     payload = {"chat_id": TELEGRAM_CHANNEL_ID, "photo": image_url, "caption": caption}
     r = requests.post(url, data=payload, timeout=60)
-    if not r.ok:
-        print("Ошибка Telegram:", r.status_code, r.text)
-    else:
-        print("Пост отправлен в канал.")
+    print("[TG RESPONSE]", r.status_code, r.text, flush=True)
 
 
 def create_and_send_post(slot: str, time_planned: str) -> None:
-    print(f"--- {slot.upper()} пост (план {time_planned}) ---")
+    print(f"[POST] START slot={slot} plan={time_planned}", flush=True)
     text = generate_post_text(slot)
     image_url = generate_image_url(slot)
     send_photo_to_telegram(image_url, text)
     log_post(slot, text, image_url, time_planned)
+    print("[POST] DONE", flush=True)
 
 
 # =========================
-# MANUAL PUBLISH (panel + buttons)
+# MANUAL PUBLISH
 # =========================
-def _check_token_or_403(token: str):
+def check_token(token: str):
     if not MANUAL_PUBLISH_TOKEN:
-        return ("MANUAL_PUBLISH_TOKEN is not set", 500)
+        return "MANUAL_PUBLISH_TOKEN not set", 500
     if token != MANUAL_PUBLISH_TOKEN:
-        return ("forbidden", 403)
+        return "forbidden", 403
     return None
-
-
-def choose_slot_by_current_time() -> str:
-    h = datetime.now().hour
-    if h < 12:
-        return "morning"
-    if h < 18:
-        return "day"
-    return "evening"
 
 
 @app.get("/publish-now")
 def publish_now():
     token = request.args.get("token", "")
-    bad = _check_token_or_403(token)
+    slot = request.args.get("slot", "day")
+
+    bad = check_token(token)
     if bad:
         return bad
 
-    slot = request.args.get("slot", "").strip().lower()
-    if not slot:
-        slot = choose_slot_by_current_time()
+    print(f"[MANUAL] Trigger slot={slot}", flush=True)
 
-    if slot not in {"morning", "day", "evening"}:
-        return ("bad slot (use morning|day|evening)", 400)
-
-    def _run():
+    def run():
         try:
             create_and_send_post(slot, f"manual-{datetime.now().strftime('%H:%M')}")
         except Exception as e:
-            print("Manual publish error:", e)
+            print("[MANUAL ERROR]", repr(e), flush=True)
+            print(traceback.format_exc(), flush=True)
 
-    threading.Thread(target=_run, daemon=True).start()
-    return (f"started: {slot}", 200)
+    threading.Thread(target=run, daemon=True).start()
+    return f"started {slot}", 200
 
 
 @app.get("/panel")
 def panel():
     token = request.args.get("token", "")
-    bad = _check_token_or_403(token)
+    bad = check_token(token)
     if bad:
         return bad
 
-    base = f"/publish-now?token={token}"
-    html = f"""
-    <html>
-      <head>
-        <meta charset="utf-8" />
-        <title>Dream Bot Panel</title>
-        <style>
-          body {{ font-family: Arial, sans-serif; padding: 20px; }}
-          .btn {{ display:inline-block; margin:8px; padding:12px 16px; background:#111827; color:#fff;
-                 border-radius:10px; text-decoration:none; }}
-          .hint {{ color:#6b7280; margin-top:10px; }}
-        </style>
-      </head>
-      <body>
-        <h2>Панель публикаций</h2>
-        <a class="btn" href="{base}">Опубликовать сейчас (AUTO)</a>
-        <a class="btn" href="{base}&slot=morning">Утро</a>
-        <a class="btn" href="{base}&slot=day">День</a>
-        <a class="btn" href="{base}&slot=evening">Вечер</a>
-        <div class="hint">Нажал кнопку — в логах появится MANUAL, пост уйдёт в канал.</div>
-      </body>
-    </html>
-    """
-    return (html, 200, {"Content-Type": "text/html; charset=utf-8"})
+    return f"""
+    <h2>Dream Bot Panel</h2>
+    <a href="/publish-now?token={token}&slot=morning">Утро</a><br><br>
+    <a href="/publish-now?token={token}&slot=day">День</a><br><br>
+    <a href="/publish-now?token={token}&slot=evening">Вечер</a>
+    """, 200
 
 
 # =========================
 # SCHEDULER
 # =========================
-def random_time_in_range(start_hour: int, end_hour_exclusive: int) -> str:
-    h = random.randint(start_hour, end_hour_exclusive - 1)
-    m = random.randint(0, 59)
-    return f"{h:02d}:{m:02d}"
+def random_time(start, end):
+    return f"{random.randint(start, end-1):02d}:{random.randint(0,59):02d}"
 
 
-def schedule_daily_posts() -> None:
-    print("Перенастраиваем расписание на новый день...")
-
-    schedule.clear("morning")
-    schedule.clear("day")
-    schedule.clear("evening")
-
-    # Утро: 08:00–08:59
-    t_morning = random_time_in_range(8, 9)
-    # День: 13:00–13:59 ✅
-    t_day = random_time_in_range(13, 14)
-    # Вечер: 18:00–18:59
-    t_evening = random_time_in_range(18, 19)
-
-    schedule.every().day.at(t_morning).do(lambda: create_and_send_post("morning", t_morning)).tag("morning")
-    schedule.every().day.at(t_day).do(lambda: create_and_send_post("day", t_day)).tag("day")
-    schedule.every().day.at(t_evening).do(lambda: create_and_send_post("evening", t_evening)).tag("evening")
-
-    print("Текущее расписание:")
-    print(f" - morning в {t_morning}")
-    print(f" - day в {t_day}")
-    print(f" - evening в {t_evening}")
+def schedule_daily_posts():
+    print("[SCHED] Перенастраиваем расписание", flush=True)
+    schedule.clear()
+    schedule.every().day.at(random_time(8, 9)).do(create_and_send_post, "morning", "auto")
+    schedule.every().day.at(random_time(13, 14)).do(create_and_send_post, "day", "auto")
+    schedule.every().day.at(random_time(18, 19)).do(create_and_send_post, "evening", "auto")
 
 
 def scheduler_loop():
     schedule_daily_posts()
-    schedule.every().day.at("00:05").do(schedule_daily_posts).tag("rescheduler")
-    print("Планировщик запущен и ждёт расписание...")
     while True:
         schedule.run_pending()
         time.sleep(1)
@@ -343,6 +220,5 @@ def scheduler_loop():
 # =========================
 if __name__ == "__main__":
     threading.Thread(target=scheduler_loop, daemon=True).start()
-
     port = int(os.environ.get("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
