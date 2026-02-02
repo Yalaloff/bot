@@ -5,7 +5,7 @@ import random
 import threading
 import traceback
 from datetime import datetime
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 import schedule
 import requests
@@ -55,23 +55,31 @@ def load_logs() -> List[Dict[str, Any]]:
         return []
     try:
         with open(LOG_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
+            data = json.load(f)
+            return data if isinstance(data, list) else []
+    except Exception as e:
+        print("Ошибка чтения логов:", e, flush=True)
         return []
 
 
 def save_logs(logs: List[Dict[str, Any]]) -> None:
-    with open(LOG_FILE, "w", encoding="utf-8") as f:
-        json.dump(logs, f, ensure_ascii=False, indent=2)
+    try:
+        with open(LOG_FILE, "w", encoding="utf-8") as f:
+            json.dump(logs, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print("Ошибка записи логов:", e, flush=True)
 
 
-def log_post(slot: str, text: str, image_url: str, time_planned: str) -> None:
+def log_post(slot: str, time_planned: str, time_sent: str, tg_status: int, tg_body: str) -> None:
     logs = load_logs()
     logs.append({
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
         "slot": slot,
         "time_planned": time_planned,
-        "time_sent": datetime.now().strftime("%H:%M"),
+        "time_sent": time_sent,
+        "tg_status": tg_status,
+        "tg_body": tg_body[:5000],
+        "manual": str(time_planned).startswith("manual"),
     })
     save_logs(logs)
 
@@ -109,7 +117,15 @@ def generate_post_text(slot: str) -> str:
     )
 
     text = r.choices[0].message.content.strip()
-    return text + "\n\n—\nНапиши свой сон 👉 @whatdreams_bot 🌙"
+
+    footer = "\n\n—\nНапиши свой сон 👉 @whatdreams_bot 🌙"
+    full = text + footer
+
+    # Telegram caption limit ~1024
+    if len(full) > 1024:
+        full = full[:1020] + "…"
+
+    return full
 
 
 # =========================
@@ -125,24 +141,72 @@ def generate_image_url(slot: str) -> str:
     return img.data[0].url
 
 
+def download_image_bytes(url: str) -> bytes:
+    """
+    Скачиваем изображение по URL в байты.
+    Это надежнее, чем отдавать Telegram ссылку (часто ссылка временная/закрытая).
+    """
+    print("[IMG] Скачиваем изображение по URL…", flush=True)
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+    }
+    r = requests.get(url, headers=headers, timeout=90)
+    print("[IMG RESPONSE]", r.status_code, r.headers.get("content-type"), flush=True)
+    r.raise_for_status()
+    if not r.content:
+        raise ValueError("Скачано пустое изображение")
+    return r.content
+
+
 # =========================
 # TELEGRAM SEND
 # =========================
-def send_photo_to_telegram(image_url: str, caption: str) -> None:
+def send_photo_to_telegram(image_bytes: bytes, caption: str) -> requests.Response:
     print(f"[TG] Отправка в канал {TELEGRAM_CHANNEL_ID}", flush=True)
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-    payload = {"chat_id": TELEGRAM_CHANNEL_ID, "photo": image_url, "caption": caption}
-    r = requests.post(url, data=payload, timeout=60)
+
+    # Отправляем файл байтами
+    files = {"photo": ("image.png", image_bytes)}
+    data = {"chat_id": TELEGRAM_CHANNEL_ID, "caption": caption}
+
+    r = requests.post(url, data=data, files=files, timeout=90)
     print("[TG RESPONSE]", r.status_code, r.text, flush=True)
+    return r
 
 
 def create_and_send_post(slot: str, time_planned: str) -> None:
     print(f"[POST] START slot={slot} plan={time_planned}", flush=True)
-    text = generate_post_text(slot)
-    image_url = generate_image_url(slot)
-    send_photo_to_telegram(image_url, text)
-    log_post(slot, text, image_url, time_planned)
-    print("[POST] DONE", flush=True)
+
+    try:
+        text = generate_post_text(slot)
+        image_url = generate_image_url(slot)
+
+        # ВАЖНО: отправляем не URL, а байты картинки
+        image_bytes = download_image_bytes(image_url)
+
+        resp = send_photo_to_telegram(image_bytes, text)
+
+        log_post(
+            slot=slot,
+            time_planned=time_planned,
+            time_sent=datetime.now().strftime("%H:%M"),
+            tg_status=resp.status_code,
+            tg_body=resp.text,
+        )
+
+        print("[POST] DONE", flush=True)
+
+    except Exception as e:
+        print("[POST ERROR]", repr(e), flush=True)
+        print(traceback.format_exc(), flush=True)
+        # Логируем ошибку в log-файл тоже
+        log_post(
+            slot=slot,
+            time_planned=time_planned,
+            time_sent=datetime.now().strftime("%H:%M"),
+            tg_status=0,
+            tg_body=f"ERROR: {repr(e)}",
+        )
 
 
 # =========================
@@ -159,11 +223,14 @@ def check_token(token: str):
 @app.get("/publish-now")
 def publish_now():
     token = request.args.get("token", "")
-    slot = request.args.get("slot", "day")
+    slot = request.args.get("slot", "day").strip().lower()
 
     bad = check_token(token)
     if bad:
         return bad
+
+    if slot not in {"morning", "day", "evening"}:
+        return "bad slot (use morning|day|evening)", 400
 
     print(f"[MANUAL] Trigger slot={slot}", flush=True)
 
@@ -186,23 +253,30 @@ def panel():
         return bad
 
     return f"""
-    <h2>Dream Bot Panel</h2>
-    <a href="/publish-now?token={token}&slot=morning">Утро</a><br><br>
-    <a href="/publish-now?token={token}&slot=day">День</a><br><br>
-    <a href="/publish-now?token={token}&slot=evening">Вечер</a>
-    """, 200
+    <html>
+      <head><meta charset="utf-8"><title>Dream Bot Panel</title></head>
+      <body style="font-family:Arial;padding:20px;">
+        <h2>Dream Bot Panel</h2>
+        <p><a href="/publish-now?token={token}&slot=morning">Утро</a></p>
+        <p><a href="/publish-now?token={token}&slot=day">День</a></p>
+        <p><a href="/publish-now?token={token}&slot=evening">Вечер</a></p>
+      </body>
+    </html>
+    """, 200, {"Content-Type": "text/html; charset=utf-8"}
 
 
 # =========================
 # SCHEDULER
 # =========================
-def random_time(start, end):
-    return f"{random.randint(start, end-1):02d}:{random.randint(0,59):02d}"
+def random_time(start_hour: int, end_hour_exclusive: int) -> str:
+    # (13,14) => 13:00-13:59
+    return f"{random.randint(start_hour, end_hour_exclusive - 1):02d}:{random.randint(0, 59):02d}"
 
 
 def schedule_daily_posts():
     print("[SCHED] Перенастраиваем расписание", flush=True)
     schedule.clear()
+
     schedule.every().day.at(random_time(8, 9)).do(create_and_send_post, "morning", "auto")
     schedule.every().day.at(random_time(13, 14)).do(create_and_send_post, "day", "auto")
     schedule.every().day.at(random_time(18, 19)).do(create_and_send_post, "evening", "auto")
