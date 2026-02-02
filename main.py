@@ -5,14 +5,16 @@ import random
 import threading
 from datetime import datetime
 from typing import List, Dict, Any
- 
+
 import schedule
 import requests
 from dotenv import load_dotenv
 from openai import OpenAI
 from flask import Flask
 
-# --- WEB (для Render Web Service) ---
+# =========================
+# WEB SERVER (Render Web Service)
+# =========================
 app = Flask(__name__)
 
 @app.get("/")
@@ -24,7 +26,9 @@ def healthz():
     return "ok", 200
 
 
-# --- ENV ---
+# =========================
+# ENV
+# =========================
 load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -36,12 +40,14 @@ OPENAI_MODEL_IMAGE = os.getenv("OPENAI_MODEL_IMAGE", "gpt-image-1")
 LOG_FILE = "posts_log.json"
 
 if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID or not OPENAI_API_KEY:
-    raise ValueError("Не заполнены TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID или OPENAI_API_KEY в окружении.")
+    raise ValueError("Не заданы TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID или OPENAI_API_KEY")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 
-# --------- ЛОГИ ---------
+# =========================
+# LOGS
+# =========================
 def load_logs() -> List[Dict[str, Any]]:
     if not os.path.exists(LOG_FILE):
         return []
@@ -78,49 +84,51 @@ def log_post(slot: str, text: str, image_url: str, time_planned: str) -> None:
 def get_last_texts_for_slot(slot: str, limit: int = 3) -> List[str]:
     logs = load_logs()
     slot_logs = [l for l in logs if l.get("slot") == slot]
-    texts = [l.get("text", "") for l in slot_logs[-limit:]]
-    return [t for t in texts if t]
+    return [l.get("text", "") for l in slot_logs[-limit:] if l.get("text")]
 
 
-# --------- ТЕМЫ ПО ДНЯМ ---------
+# =========================
+# WEEKDAY TOPICS
+# =========================
 def get_weekday_topic() -> str:
     weekday = datetime.now().weekday()
     topics = {
-        0: "Сегодня понедельник. Тема дня — эмоции во снах: чувства, которые прячутся за образами.",
-        1: "Сегодня вторник. Тема дня — природные символы: вода, лес, животные и их подсказки.",
-        2: "Сегодня среда. Тема дня — архетипы: дом, коридоры, комнаты, двери и их смысл.",
-        3: "Сегодня четверг. Тема дня — знаки и предчувствия: сны-подсказки и внутренние ориентиры.",
-        4: "Сегодня пятница. Тема дня — повторяющиеся и навязчивые сны: циклы, которые просят быть замеченными.",
-        5: "Сегодня суббота. Тема дня — энергия сна: как ночные образы заряжают или забирают силу.",
-        6: "Сегодня воскресенье. Тема дня — восстановление и медитативные образы перед новой неделей.",
+        0: "Сегодня понедельник — эмоции во снах и чувства, спрятанные за образами.",
+        1: "Сегодня вторник — природные символы: вода, лес, животные и их подсказки.",
+        2: "Сегодня среда — архетипы: дом, коридоры, комнаты, двери.",
+        3: "Сегодня четверг — знаки и предчувствия, сны-подсказки.",
+        4: "Сегодня пятница — повторяющиеся и навязчивые сны.",
+        5: "Сегодня суббота — энергия сна и внутренние потоки.",
+        6: "Сегодня воскресенье — восстановление и медитативные образы.",
     }
     return topics.get(weekday, "")
 
 
-# --------- ТЕКСТ (эзотерика) ---------
+# =========================
+# TEXT GENERATION (эзотерика)
+# =========================
 def generate_post_text(slot: str) -> str:
     slot_prompt = {
-        "morning": "Утро. Мягкий эзотерический пост о снах как ночных посланиях.",
-        "day": "День. Эзотерический пост о символах во снах, знаках и повторяющихся образах.",
-        "evening": "Вечер. Спокойный пост-ритуал перед сном, про доверие подсознанию и подсказки Вселенной.",
+        "morning": "Утренний мягкий эзотерический пост о снах как ночных посланиях.",
+        "day": "Дневной пост о символах во снах, знаках и подсознательных подсказках.",
+        "evening": "Вечерний спокойный пост-ритуал перед погружением в сон.",
     }.get(slot, "Эзотерический пост о снах.")
-
-    weekday_topic = get_weekday_topic()
 
     system_message = (
         "Ты — автор эзотерического Telegram-канала о толковании снов. "
-        "Пишешь мягко, красиво, без страшилок и жёстких предсказаний. "
-        "Символы, энергия, знаки, Вселенная — но простым языком."
+        "Пиши мягко, красиво, без страшилок. Символы, энергия, знаки, Вселенная — "
+        "но понятным и тёплым языком."
     )
 
-    last_texts = get_last_texts_for_slot(slot, 3)
     history = ""
+    last_texts = get_last_texts_for_slot(slot)
     if last_texts:
-        history = "\n\nНе повторяй дословно эти недавние посты:\n" + "\n---\n".join(last_texts)
+        history = "\n\nНе повторяй идеи этих недавних постов:\n" + "\n---\n".join(last_texts)
 
     user_message = (
-        f"{slot_prompt} Объём 500–900 символов. Без хэштегов. 1–3 эмодзи внутри текста по смыслу.\n\n"
-        f"{weekday_topic}"
+        f"{slot_prompt}\n\n"
+        f"{get_weekday_topic()}\n\n"
+        "Объём 500–900 символов. Без хэштегов. 1–3 эмодзи внутри текста."
         f"{history}"
     )
 
@@ -133,6 +141,7 @@ def generate_post_text(slot: str) -> str:
         max_tokens=700,
         temperature=0.95,
     )
+
     text = r.choices[0].message.content.strip()
 
     footer = (
@@ -145,32 +154,35 @@ def generate_post_text(slot: str) -> str:
     if len(full) > 1024:
         allowed = 1024 - len(footer) - 3
         full = text[:allowed].rstrip() + "..." + footer
+
     return full
 
 
-# --------- КАРТИНКА ---------
+# =========================
+# IMAGE GENERATION
+# =========================
 def generate_image_url(slot: str) -> str:
     weekday = datetime.now().weekday()
     weekday_style = {
         0: "эмоции, сияние сердца, мягкие волны энергии",
         1: "вода, лес, силуэты животных, мистический туман",
-        2: "дом, коридоры, двери, многослойное пространство",
-        3: "созвездия, знаки, подсказки на ночном небе",
+        2: "дом, коридоры, двери, архетипичные формы",
+        3: "созвездия, знаки, ночное небо",
         4: "повторяющиеся спирали, циклы, лестницы",
-        5: "энергетические потоки, аура, свет вокруг фигуры",
-        6: "спокойная вода, луна, медитативный ландшафт",
-    }.get(weekday, "мистический пейзаж, связанный со снами")
+        5: "энергетические потоки, аура, свет",
+        6: "спокойная вода, луна, медитативный пейзаж",
+    }.get(weekday, "мистический пейзаж сна")
 
     base_style = {
         "morning": "рассвет, мягкое пробуждение, тёплые тона",
         "day": "ясные контуры, символы сна, лёгкий сюрреализм",
-        "evening": "ночь, звёзды, глубокие оттенки, спокойствие",
-    }.get(slot, "мистическая атмосфера сна")
+        "evening": "ночь, звёзды, глубокие оттенки",
+    }.get(slot, "атмосфера сна")
 
     prompt = (
         "Иллюстрация для эзотерического Telegram-канала о толковании снов: "
         f"{weekday_style}, {base_style}. "
-        "Без текста и надписей, без логотипов. Атмосферно, современно, красиво."
+        "Без текста, без надписей, без логотипов."
     )
 
     img = client.images.generate(
@@ -182,26 +194,34 @@ def generate_image_url(slot: str) -> str:
     return img.data[0].url
 
 
-# --------- TELEGRAM ---------
+# =========================
+# TELEGRAM SEND
+# =========================
 def send_photo_to_telegram(image_url: str, caption: str) -> None:
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-    payload = {"chat_id": TELEGRAM_CHANNEL_ID, "photo": image_url, "caption": caption}
-    resp = requests.post(url, data=payload, timeout=60)
-    if not resp.ok:
-        print("Telegram sendPhoto error:", resp.status_code, resp.text)
+    payload = {
+        "chat_id": TELEGRAM_CHANNEL_ID,
+        "photo": image_url,
+        "caption": caption,
+    }
+    r = requests.post(url, data=payload, timeout=60)
+    if not r.ok:
+        print("Ошибка Telegram:", r.status_code, r.text)
     else:
-        print("Отправлено в канал.")
+        print("Пост отправлен в канал.")
 
 
 def create_and_send_post(slot: str, time_planned: str) -> None:
-    print(f"--- Пост: {slot} (план {time_planned}) ---")
+    print(f"--- {slot.upper()} пост (план {time_planned}) ---")
     text = generate_post_text(slot)
     image_url = generate_image_url(slot)
     send_photo_to_telegram(image_url, text)
     log_post(slot, text, image_url, time_planned)
 
 
-# --------- SCHEDULER ---------
+# =========================
+# SCHEDULER
+# =========================
 def random_time_in_range(start_hour: int, end_hour_exclusive: int) -> str:
     h = random.randint(start_hour, end_hour_exclusive - 1)
     m = random.randint(0, 59)
@@ -216,7 +236,7 @@ def schedule_daily_posts() -> None:
     schedule.clear("evening")
 
     t_morning = random_time_in_range(8, 9)
-    t_day = random_time_in_range(15, 16)
+    t_day = "15:17"          # 🔥 ФИКСИРОВАННО
     t_evening = random_time_in_range(18, 19)
 
     schedule.every().day.at(t_morning).do(lambda: create_and_send_post("morning", t_morning)).tag("morning")
@@ -238,12 +258,11 @@ def scheduler_loop():
         time.sleep(1)
 
 
-# --------- ENTRYPOINT ---------
+# =========================
+# ENTRYPOINT
+# =========================
 if __name__ == "__main__":
-    # В фоне запускаем планировщик
-    t = threading.Thread(target=scheduler_loop, daemon=True)
-    t.start()
+    threading.Thread(target=scheduler_loop, daemon=True).start()
 
-    # Веб-сервер для Render health checks
     port = int(os.environ.get("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
