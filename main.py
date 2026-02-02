@@ -6,6 +6,7 @@ import threading
 import traceback
 import base64
 import html
+import re
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 
@@ -98,9 +99,6 @@ def last_post_time() -> Optional[datetime]:
 
 
 def was_recent_post_any(minutes: int = 7) -> bool:
-    """
-    Защита от дублей: если ЛЮБОЙ пост был менее N минут назад — пропускаем.
-    """
     t = last_post_time()
     if not t:
         return False
@@ -124,29 +122,7 @@ def get_weekday_topic() -> str:
 
 
 # =========================
-# STYLE BY SLOT (утро/день/вечер)
-# =========================
-def slot_style(slot: str) -> str:
-    if slot == "morning":
-        return (
-            "Стиль: утренний, мягкий и вдохновляющий. "
-            "Больше света, надежды, лёгкая магия дня. "
-            "Без страховок и мрачности."
-        )
-    if slot == "day":
-        return (
-            "Стиль: дневной, чуть более практичный. "
-            "Символы, трактовки, подсказки подсознания. "
-            "Без категоричных предсказаний."
-        )
-    return (
-        "Стиль: вечерний, спокойный, как мини-ритуал перед сном. "
-        "Тишина, благодарность, намерение, забота о себе."
-    )
-
-
-# =========================
-# TEXT GENERATION: HOOK + BODY + 3-5 EMOJI
+# TEXT UTILITIES
 # =========================
 def parse_hook_and_body(text: str) -> Tuple[str, str]:
     """
@@ -156,43 +132,77 @@ def parse_hook_and_body(text: str) -> Tuple[str, str]:
     """
     hook = ""
     body = ""
-    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    lines = [l.rstrip() for l in text.splitlines()]
+
     for line in lines:
-        if line.lower().startswith("hook:"):
-            hook = line.split(":", 1)[1].strip()
-        elif line.lower().startswith("text:"):
-            body = line.split(":", 1)[1].strip()
+        s = line.strip()
+        if not s:
+            continue
+        if s.lower().startswith("hook:"):
+            hook = s.split(":", 1)[1].strip()
+        elif s.lower().startswith("text:"):
+            body = s.split(":", 1)[1].strip()
         else:
-            # если модель не соблюла формат — аккуратно собираем
             if not hook:
-                hook = line
+                hook = s
             else:
-                body = (body + "\n" + line).strip() if body else line
+                body = (body + "\n" + s).strip() if body else s
+
     return hook.strip(), body.strip()
 
 
-def generate_post_parts(slot: str) -> Tuple[str, str]:
-    print(f"[GEN] Генерируем текст для слота: {slot}", flush=True)
+def count_emojis(s: str) -> int:
+    """
+    Приблизительный подсчёт эмодзи по Unicode диапазонам.
+    Достаточно для контроля 3–5.
+    """
+    emoji_pattern = re.compile(
+        "["
+        "\U0001F300-\U0001F5FF"
+        "\U0001F600-\U0001F64F"
+        "\U0001F680-\U0001F6FF"
+        "\U0001F700-\U0001F77F"
+        "\U0001F780-\U0001F7FF"
+        "\U0001F800-\U0001F8FF"
+        "\U0001F900-\U0001F9FF"
+        "\U0001FA00-\U0001FA6F"
+        "\U0001FA70-\U0001FAFF"
+        "\u2600-\u26FF"
+        "\u2700-\u27BF"
+        "]+"
+    )
+    # Каждое совпадение может содержать несколько символов; посчитаем по длине строки совпадений
+    matches = emoji_pattern.findall(s)
+    return sum(len(m) for m in matches)
 
-    topic = get_weekday_topic()
-    style = slot_style(slot)
+
+def enforce_emoji_range(hook: str, body: str, min_e: int = 3, max_e: int = 5) -> Tuple[str, str]:
+    """
+    Если эмодзи не 3–5 — просим модель отредактировать ТОЛЬКО TEXT,
+    сохранив структуру и смысл. HOOK оставляем без эмодзи.
+    """
+    total = count_emojis(body)
+    if min_e <= total <= max_e:
+        return hook, body
+
+    print(f"[FIX] Emoji count={total}, исправляем до {min_e}-{max_e}", flush=True)
 
     system_msg = (
-        "Ты автор эзотерического Telegram-канала о снах. "
-        "Пишешь красиво, мягко, без страшилок и без жёстких предсказаний. "
-        "Никаких хэштегов."
+        "Ты редактор Telegram-постов. Правь только текст, не меняя структуру блоков. "
+        "Держи стиль дерзко/современно, без воды."
     )
-
     user_msg = (
-        f"Тема: {topic}\n"
-        f"{style}\n\n"
-        "Сделай пост 500–750 символов.\n"
-        "В первой строке: крючок (вопрос/интрига), короткий.\n"
-        "В тексте: 3–5 уместных эмодзи, равномерно (не в каждой строке).\n"
-        "Верни строго в формате:\n"
+        "Отредактируй только блок TEXT так, чтобы:\n"
+        f"- В TEXT было {min_e}-{max_e} эмодзи (сейчас их {total}).\n"
+        "- Эмодзи распределены по тексту, не в каждой строке.\n"
+        "- Смысл, тон и структура блоков сохраняются.\n"
+        "- Не добавляй хэштеги.\n"
+        "- Не добавляй эмодзи в HOOK.\n\n"
+        f"HOOK: {hook}\n"
+        f"TEXT:\n{body}\n\n"
+        "Верни строго:\n"
         "HOOK: ...\n"
         "TEXT: ...\n"
-        "Без лишних строк и без заголовков кроме HOOK/TEXT."
     )
 
     r = client.chat.completions.create(
@@ -201,26 +211,28 @@ def generate_post_parts(slot: str) -> Tuple[str, str]:
             {"role": "system", "content": system_msg},
             {"role": "user", "content": user_msg},
         ],
-        max_tokens=800,
-        temperature=0.9,
+        max_tokens=500,
+        temperature=0.4,
     )
 
     raw = r.choices[0].message.content.strip()
-    hook, body = parse_hook_and_body(raw)
+    h2, b2 = parse_hook_and_body(raw)
 
-    # fallback safety
-    if not hook:
-        hook = "Что твой сон пытается сказать тебе сегодня? 🌙"
-    if not body:
-        body = raw
+    # Safety: если модель сломала формат — просто вернём исходное, но слегка поправим вручную
+    if not h2:
+        h2 = hook
+    if not b2:
+        b2 = body
 
-    return hook, body
+    # Повторная проверка; если всё равно не ок — не зацикливаем, принимаем как есть
+    total2 = count_emojis(b2)
+    if not (min_e <= total2 <= max_e):
+        print(f"[FIX] Emoji after fix={total2} (оставляю как есть)", flush=True)
+
+    return h2, b2
 
 
 def build_caption_html(hook: str, body: str) -> str:
-    """
-    Telegram HTML parse_mode: экранируем всё и делаем hook жирным.
-    """
     footer = "—\nНапиши свой сон 👉 @whatdreams_bot 🌙"
 
     hook_html = f"<b>{html.escape(hook)}</b>"
@@ -229,18 +241,111 @@ def build_caption_html(hook: str, body: str) -> str:
 
     caption = f"{hook_html}\n\n{body_html}\n\n{footer_html}"
 
-    # лимит caption примерно 1024 символа (безопасно режем)
-    # считаем по plain length грубо — Telegram считает иначе, но этого достаточно
+    # Безопасный лимит (Telegram caption ~1024). Режем по длине строки (грубо, но стабильно).
     if len(caption) > 1000:
-        # аккуратно урежем body
         excess = len(caption) - 1000
         if excess > 0 and len(body_html) > excess + 10:
-            body_html_cut = body_html[: max(0, len(body_html) - excess - 10)].rstrip() + "…"
-            caption = f"{hook_html}\n\n{body_html_cut}\n\n{footer_html}"
-        # если всё равно больше — финальный срез
+            body_html = body_html[: max(0, len(body_html) - excess - 10)].rstrip() + "…"
+            caption = f"{hook_html}\n\n{body_html}\n\n{footer_html}"
         caption = caption[:1000]
 
     return caption
+
+
+# =========================
+# SLOT STRUCTURES (утро/день/вечер)
+# =========================
+def slot_rules(slot: str, topic: str) -> str:
+    """
+    Отличаем посты по структуре:
+    - утро: "Намерение дня" + микро-практика
+    - день: "Символ дня" + трактовка + вывод
+    - вечер: "Ритуал на ночь" + аффирмация
+    """
+    if slot == "morning":
+        return (
+            f"Тема: {topic}\n"
+            "Тон: дерзко/современно, но тепло. Короткие строки. Без воды.\n"
+            "Структура TEXT:\n"
+            "1) 4–6 коротких строк (до 90 символов каждая)\n"
+            "2) Блок: «Намерение дня: …» (1 строка)\n"
+            "3) Блок: «Практика на 30 секунд: …» (1 строка)\n"
+        )
+    if slot == "day":
+        return (
+            f"Тема: {topic}\n"
+            "Тон: ясно, практично, без мистики-страшилок. Короткие строки.\n"
+            "Структура TEXT:\n"
+            "1) 4–6 коротких строк\n"
+            "2) Блок: «Символ дня: <одно слово/образ> — <трактовка в 1 строку>»\n"
+            "3) Блок: «Вывод: …» (1 строка)\n"
+            "4) Блок: «Практика на 30 секунд: …» (1 строка)\n"
+        )
+    # evening
+    return (
+        f"Тема: {topic}\n"
+        "Тон: спокойный, мягкий, как мини-ритуал. Короткие строки.\n"
+        "Структура TEXT:\n"
+        "1) 4–6 коротких строк\n"
+        "2) Блок: «Ритуал на ночь: …» (1 строка)\n"
+        "3) Блок: «Аффирмация: …» (1 строка)\n"
+        "4) Блок: «Практика на 30 секунд: …» (1 строка)\n"
+    )
+
+
+# =========================
+# TEXT GENERATION (Variant B)
+# =========================
+def generate_post_parts(slot: str) -> Tuple[str, str]:
+    print(f"[GEN] Генерируем текст для слота: {slot}", flush=True)
+
+    topic = get_weekday_topic()
+
+    system_msg = (
+        "Ты автор Telegram-канала о снах. Пиши дерзко и современно (как автор Reels), "
+        "короткими фразами, лёгкая ирония допустима. "
+        "Но без грубости. Без воды. Без хэштегов. "
+        "Не делай предсказаний. Не пугай."
+    )
+
+    user_msg = f"""
+{slot_rules(slot, topic)}
+
+Ограничения:
+- HOOK: 1 строка, 7–12 слов, вопрос/интрига, БЕЗ эмодзи.
+- TEXT: общий объём 450–650 символов, 4–6 коротких строк + обязательные блоки из структуры.
+- В TEXT: 3–5 эмодзи, распределены по тексту (не в каждой строке).
+- Не используй слова: "подписывайся", "лайк", "репост".
+- Не начинай текст с "сегодня поговорим".
+
+Верни строго:
+HOOK: ...
+TEXT: ...
+""".strip()
+
+    r = client.chat.completions.create(
+        model=OPENAI_MODEL_CHAT,
+        messages=[
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": user_msg},
+        ],
+        max_tokens=900,
+        temperature=0.9,
+    )
+
+    raw = r.choices[0].message.content.strip()
+    hook, body = parse_hook_and_body(raw)
+
+    # Safety fallback
+    if not hook:
+        hook = "Твой сон сегодня намекает… но ты это заметил?"
+    if not body:
+        body = raw
+
+    # enforce emoji 3–5
+    hook, body = enforce_emoji_range(hook, body, min_e=3, max_e=5)
+
+    return hook, body
 
 
 # =========================
@@ -248,7 +353,7 @@ def build_caption_html(hook: str, body: str) -> str:
 # =========================
 def extract_image_prompt(hook: str, body: str) -> str:
     """
-    Делаем короткий визуальный промпт (1 строка) под конкретный пост.
+    Делаем короткий визуальный промпт под конкретный пост.
     """
     print("[GEN] Делаем визуальный промпт из текста…", flush=True)
 
@@ -261,38 +366,35 @@ def extract_image_prompt(hook: str, body: str) -> str:
                 "role": "system",
                 "content": (
                     "Ты превращаешь текст поста о снах в краткий визуальный prompt для иллюстрации. "
-                    "Один ряд, без кавычек, без хэштегов, без упоминания Telegram/ботов."
+                    "Один ряд, конкретные объекты/сцена/свет/настроение. "
+                    "Без кавычек, без хэштегов, без упоминания Telegram/ботов. "
+                    "Никакого текста на изображении."
                 )
             },
             {
                 "role": "user",
                 "content": (
-                    "Сделай визуальный prompt (1 предложение) для мистической иллюстрации сна "
-                    "в мягком сюрреализме. Без текста на изображении.\n\n"
+                    "Сделай визуальный prompt (1 предложение) для мягкой сюрреалистичной иллюстрации сна.\n\n"
                     f"Текст:\n{text}"
                 )
             },
         ],
-        max_tokens=80,
+        max_tokens=90,
         temperature=0.6,
     )
     prompt = r.choices[0].message.content.strip()
-    # safety: коротко
-    return prompt[:220]
+    return prompt[:240]
 
 
 # =========================
 # IMAGE GENERATION (OpenAI GPT-Image-1)
 # =========================
 def generate_image_bytes(image_prompt: str) -> bytes:
-    """
-    Для gpt-image-1: b64_json обычно приходит по умолчанию (на openai==2.14.0).
-    """
     print("[GEN] Генерируем изображение (gpt-image-1)...", flush=True)
 
     final_prompt = (
-        f"Мистическая иллюстрация сна: {image_prompt}. "
-        "Мягкий свет, атмосферно, красиво, современный стиль, без текста, без логотипов."
+        f"Dreamlike surreal illustration: {image_prompt}. "
+        "soft light, cinematic, atmospheric, modern style, high quality, no text, no logo."
     )
 
     img = client.images.generate(
@@ -344,7 +446,7 @@ def send_photo_to_telegram(image_bytes: bytes, caption_html: str) -> requests.Re
 def create_and_send_post(slot: str, time_planned: str) -> None:
     print(f"[POST] START slot={slot} plan={time_planned}", flush=True)
 
-    # анти-дубликаты: если недавно уже был пост — не шлём
+    # анти-дубликаты: если любой пост был < N минут назад — пропускаем
     if was_recent_post_any(minutes=7):
         print("[SKIP] Недавний пост был < 7 минут назад — пропускаем", flush=True)
         return
@@ -433,7 +535,7 @@ def panel():
         <a class="btn" href="/publish-now?token={token}&slot=morning">Утро</a><br/>
         <a class="btn" href="/publish-now?token={token}&slot=day">День</a><br/>
         <a class="btn" href="/publish-now?token={token}&slot=evening">Вечер</a><br/>
-        <div class="muted">Если был пост менее 7 минут назад — система пропустит отправку (анти-дубликаты).</div>
+        <div class="muted">Если был пост менее 7 минут назад — отправка будет пропущена (анти-дубликаты).</div>
       </body>
     </html>
     """, 200, {"Content-Type": "text/html; charset=utf-8"}
@@ -464,7 +566,6 @@ def schedule_daily_posts():
 
 def scheduler_loop():
     schedule_daily_posts()
-    # ежедневно обновляем расписание
     schedule.every().day.at("00:05").do(schedule_daily_posts)
     while True:
         schedule.run_pending()
