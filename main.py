@@ -37,7 +37,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL_CHAT = os.getenv("OPENAI_MODEL_CHAT", "gpt-4o-mini")
 OPENAI_MODEL_IMAGE = os.getenv("OPENAI_MODEL_IMAGE", "gpt-image-1")
 
-# 🔐 Секрет для ручной публикации (задай в Render Environment)
+# 🔐 Секрет для ручной публикации (Render Environment)
 MANUAL_PUBLISH_TOKEN = os.getenv("MANUAL_PUBLISH_TOKEN", "")
 
 LOG_FILE = "posts_log.json"
@@ -203,11 +203,7 @@ def generate_image_url(slot: str) -> str:
 # =========================
 def send_photo_to_telegram(image_url: str, caption: str) -> None:
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-    payload = {
-        "chat_id": TELEGRAM_CHANNEL_ID,
-        "photo": image_url,
-        "caption": caption,
-    }
+    payload = {"chat_id": TELEGRAM_CHANNEL_ID, "photo": image_url, "caption": caption}
     r = requests.post(url, data=payload, timeout=60)
     if not r.ok:
         print("Ошибка Telegram:", r.status_code, r.text)
@@ -224,8 +220,16 @@ def create_and_send_post(slot: str, time_planned: str) -> None:
 
 
 # =========================
-# MANUAL PUBLISH (кнопки)
+# MANUAL PUBLISH (panel + buttons)
 # =========================
+def _check_token_or_403(token: str):
+    if not MANUAL_PUBLISH_TOKEN:
+        return ("MANUAL_PUBLISH_TOKEN is not set", 500)
+    if token != MANUAL_PUBLISH_TOKEN:
+        return ("forbidden", 403)
+    return None
+
+
 def choose_slot_by_current_time() -> str:
     h = datetime.now().hour
     if h < 12:
@@ -235,21 +239,8 @@ def choose_slot_by_current_time() -> str:
     return "evening"
 
 
-def _check_token_or_403(token: str):
-    if not MANUAL_PUBLISH_TOKEN:
-        return ("MANUAL_PUBLISH_TOKEN is not set", 500)
-    if token != MANUAL_PUBLISH_TOKEN:
-        return ("forbidden", 403)
-    return None
-
-
 @app.get("/publish-now")
 def publish_now():
-    """
-    Примеры:
-    /publish-now?token=SECRET
-    /publish-now?token=SECRET&slot=day
-    """
     token = request.args.get("token", "")
     bad = _check_token_or_403(token)
     if bad:
@@ -274,11 +265,6 @@ def publish_now():
 
 @app.get("/panel")
 def panel():
-    """
-    Простая панель с кнопками.
-    Открывай так:
-    /panel?token=SECRET
-    """
     token = request.args.get("token", "")
     bad = _check_token_or_403(token)
     if bad:
@@ -303,7 +289,7 @@ def panel():
         <a class="btn" href="{base}&slot=morning">Утро</a>
         <a class="btn" href="{base}&slot=day">День</a>
         <a class="btn" href="{base}&slot=evening">Вечер</a>
-        <div class="hint">Если кнопка нажата — в логах появится “MANUAL…”, пост уйдёт в канал.</div>
+        <div class="hint">Нажал кнопку — в логах появится MANUAL, пост уйдёт в канал.</div>
       </body>
     </html>
     """
@@ -314,10 +300,6 @@ def panel():
 # SCHEDULER
 # =========================
 def random_time_in_range(start_hour: int, end_hour_exclusive: int) -> str:
-    """
-    Возвращает HH:MM в диапазоне [start_hour, end_hour_exclusive)
-    Пример: (13,14) => 13:00–13:59
-    """
     h = random.randint(start_hour, end_hour_exclusive - 1)
     m = random.randint(0, 59)
     return f"{h:02d}:{m:02d}"
@@ -332,7 +314,7 @@ def schedule_daily_posts() -> None:
 
     # Утро: 08:00–08:59
     t_morning = random_time_in_range(8, 9)
-    # ✅ День: 13:00–13:59 (как ты попросил)
+    # День: 13:00–13:59 ✅
     t_day = random_time_in_range(13, 14)
     # Вечер: 18:00–18:59
     t_evening = random_time_in_range(18, 19)
