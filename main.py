@@ -4,8 +4,9 @@ import json
 import random
 import threading
 import traceback
+import base64
 from datetime import datetime
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 
 import schedule
 import requests
@@ -129,33 +130,33 @@ def generate_post_text(slot: str) -> str:
 
 
 # =========================
-# IMAGE GENERATION
+# IMAGE GENERATION (B64 -> BYTES)
 # =========================
-def generate_image_url(slot: str) -> str:
-    print("[GEN] Генерируем изображение…", flush=True)
+def generate_image_bytes(slot: str) -> bytes:
+    """
+    Надежный способ: просим OpenAI вернуть картинку base64,
+    декодируем и отправляем в Telegram как файл.
+    """
+    print("[GEN] Генерируем изображение (b64)...", flush=True)
+
     img = client.images.generate(
         model=OPENAI_MODEL_IMAGE,
-        prompt="Мистическая иллюстрация сна, луна, символы, без текста",
+        prompt="Мистическая иллюстрация сна, луна, символы, без текста. Атмосферно, красиво.",
         size="1024x1024",
+        response_format="b64_json",
     )
-    return img.data[0].url
 
+    # В ответе будет b64_json
+    b64 = img.data[0].b64_json
+    if not b64:
+        raise ValueError("OpenAI images.generate вернул пустой b64_json")
 
-def download_image_bytes(url: str) -> bytes:
-    """
-    Скачиваем изображение по URL в байты.
-    Это надежнее, чем отдавать Telegram ссылку (часто ссылка временная/закрытая).
-    """
-    print("[IMG] Скачиваем изображение по URL…", flush=True)
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-    }
-    r = requests.get(url, headers=headers, timeout=90)
-    print("[IMG RESPONSE]", r.status_code, r.headers.get("content-type"), flush=True)
-    r.raise_for_status()
-    if not r.content:
-        raise ValueError("Скачано пустое изображение")
-    return r.content
+    image_bytes = base64.b64decode(b64)
+    if not image_bytes:
+        raise ValueError("Декодированное изображение пустое")
+
+    print(f"[GEN] Картинка готова, bytes={len(image_bytes)}", flush=True)
+    return image_bytes
 
 
 # =========================
@@ -165,7 +166,6 @@ def send_photo_to_telegram(image_bytes: bytes, caption: str) -> requests.Respons
     print(f"[TG] Отправка в канал {TELEGRAM_CHANNEL_ID}", flush=True)
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
 
-    # Отправляем файл байтами
     files = {"photo": ("image.png", image_bytes)}
     data = {"chat_id": TELEGRAM_CHANNEL_ID, "caption": caption}
 
@@ -179,10 +179,7 @@ def create_and_send_post(slot: str, time_planned: str) -> None:
 
     try:
         text = generate_post_text(slot)
-        image_url = generate_image_url(slot)
-
-        # ВАЖНО: отправляем не URL, а байты картинки
-        image_bytes = download_image_bytes(image_url)
+        image_bytes = generate_image_bytes(slot)
 
         resp = send_photo_to_telegram(image_bytes, text)
 
@@ -199,7 +196,7 @@ def create_and_send_post(slot: str, time_planned: str) -> None:
     except Exception as e:
         print("[POST ERROR]", repr(e), flush=True)
         print(traceback.format_exc(), flush=True)
-        # Логируем ошибку в log-файл тоже
+
         log_post(
             slot=slot,
             time_planned=time_planned,
@@ -269,7 +266,6 @@ def panel():
 # SCHEDULER
 # =========================
 def random_time(start_hour: int, end_hour_exclusive: int) -> str:
-    # (13,14) => 13:00-13:59
     return f"{random.randint(start_hour, end_hour_exclusive - 1):02d}:{random.randint(0, 59):02d}"
 
 
