@@ -10,7 +10,7 @@ import schedule
 import requests
 from dotenv import load_dotenv
 from openai import OpenAI
-from flask import Flask
+from flask import Flask, request
 
 # =========================
 # WEB SERVER (Render Web Service)
@@ -36,6 +36,9 @@ TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL_CHAT = os.getenv("OPENAI_MODEL_CHAT", "gpt-4o-mini")
 OPENAI_MODEL_IMAGE = os.getenv("OPENAI_MODEL_IMAGE", "gpt-image-1")
+
+# 🔐 Токен для ручной публикации (задай в Render Environment)
+MANUAL_PUBLISH_TOKEN = os.getenv("MANUAL_PUBLISH_TOKEN", "")
 
 LOG_FILE = "posts_log.json"
 
@@ -77,6 +80,7 @@ def log_post(slot: str, text: str, image_url: str, time_planned: str) -> None:
         "image_url": image_url,
         "time_planned": time_planned,
         "time_sent": datetime.now().strftime("%H:%M"),
+        "manual": time_planned.startswith("manual"),
     })
     save_logs(logs)
 
@@ -220,6 +224,50 @@ def create_and_send_post(slot: str, time_planned: str) -> None:
 
 
 # =========================
+# MANUAL PUBLISH (кнопка/триггер)
+# =========================
+def choose_slot_by_current_time() -> str:
+    """Если слот не передан, выбираем по текущему часу."""
+    h = datetime.now().hour
+    if h < 12:
+        return "morning"
+    if h < 18:
+        return "day"
+    return "evening"
+
+
+@app.get("/publish-now")
+def publish_now():
+    """
+    Пример:
+    /publish-now?token=SECRET
+    /publish-now?token=SECRET&slot=day
+    """
+    token = request.args.get("token", "")
+    if not MANUAL_PUBLISH_TOKEN:
+        return "MANUAL_PUBLISH_TOKEN is not set", 500
+    if token != MANUAL_PUBLISH_TOKEN:
+        return "forbidden", 403
+
+    slot = request.args.get("slot", "").strip().lower()
+    if not slot:
+        slot = choose_slot_by_current_time()
+
+    if slot not in {"morning", "day", "evening"}:
+        return "bad slot (use morning|day|evening)", 400
+
+    # Чтобы не блокировать ответ, отправляем в отдельном потоке
+    def _run():
+        try:
+            create_and_send_post(slot, f"manual-{datetime.now().strftime('%H:%M')}")
+        except Exception as e:
+            print("Manual publish error:", e)
+
+    threading.Thread(target=_run, daemon=True).start()
+    return f"started: {slot}", 200
+
+
+# =========================
 # SCHEDULER
 # =========================
 def random_time_in_range(start_hour: int, end_hour_exclusive: int) -> str:
@@ -236,7 +284,7 @@ def schedule_daily_posts() -> None:
     schedule.clear("evening")
 
     t_morning = random_time_in_range(8, 9)
-    t_day = "15:23"          # 🔥 ФИКСИРОВАННО
+    t_day = "15:15"          # фикс
     t_evening = random_time_in_range(18, 19)
 
     schedule.every().day.at(t_morning).do(lambda: create_and_send_post("morning", t_morning)).tag("morning")
