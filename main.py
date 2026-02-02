@@ -37,7 +37,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL_CHAT = os.getenv("OPENAI_MODEL_CHAT", "gpt-4o-mini")
 OPENAI_MODEL_IMAGE = os.getenv("OPENAI_MODEL_IMAGE", "gpt-image-1")
 
-# 🔐 Токен для ручной публикации (задай в Render Environment)
+# 🔐 Секрет для ручной публикации (задай в Render Environment)
 MANUAL_PUBLISH_TOKEN = os.getenv("MANUAL_PUBLISH_TOKEN", "")
 
 LOG_FILE = "posts_log.json"
@@ -224,10 +224,9 @@ def create_and_send_post(slot: str, time_planned: str) -> None:
 
 
 # =========================
-# MANUAL PUBLISH (кнопка/триггер)
+# MANUAL PUBLISH (кнопки)
 # =========================
 def choose_slot_by_current_time() -> str:
-    """Если слот не передан, выбираем по текущему часу."""
     h = datetime.now().hour
     if h < 12:
         return "morning"
@@ -236,27 +235,33 @@ def choose_slot_by_current_time() -> str:
     return "evening"
 
 
+def _check_token_or_403(token: str):
+    if not MANUAL_PUBLISH_TOKEN:
+        return ("MANUAL_PUBLISH_TOKEN is not set", 500)
+    if token != MANUAL_PUBLISH_TOKEN:
+        return ("forbidden", 403)
+    return None
+
+
 @app.get("/publish-now")
 def publish_now():
     """
-    Пример:
+    Примеры:
     /publish-now?token=SECRET
     /publish-now?token=SECRET&slot=day
     """
     token = request.args.get("token", "")
-    if not MANUAL_PUBLISH_TOKEN:
-        return "MANUAL_PUBLISH_TOKEN is not set", 500
-    if token != MANUAL_PUBLISH_TOKEN:
-        return "forbidden", 403
+    bad = _check_token_or_403(token)
+    if bad:
+        return bad
 
     slot = request.args.get("slot", "").strip().lower()
     if not slot:
         slot = choose_slot_by_current_time()
 
     if slot not in {"morning", "day", "evening"}:
-        return "bad slot (use morning|day|evening)", 400
+        return ("bad slot (use morning|day|evening)", 400)
 
-    # Чтобы не блокировать ответ, отправляем в отдельном потоке
     def _run():
         try:
             create_and_send_post(slot, f"manual-{datetime.now().strftime('%H:%M')}")
@@ -264,13 +269,55 @@ def publish_now():
             print("Manual publish error:", e)
 
     threading.Thread(target=_run, daemon=True).start()
-    return f"started: {slot}", 200
+    return (f"started: {slot}", 200)
+
+
+@app.get("/panel")
+def panel():
+    """
+    Простая панель с кнопками.
+    Открывай так:
+    /panel?token=SECRET
+    """
+    token = request.args.get("token", "")
+    bad = _check_token_or_403(token)
+    if bad:
+        return bad
+
+    base = f"/publish-now?token={token}"
+    html = f"""
+    <html>
+      <head>
+        <meta charset="utf-8" />
+        <title>Dream Bot Panel</title>
+        <style>
+          body {{ font-family: Arial, sans-serif; padding: 20px; }}
+          .btn {{ display:inline-block; margin:8px; padding:12px 16px; background:#111827; color:#fff;
+                 border-radius:10px; text-decoration:none; }}
+          .hint {{ color:#6b7280; margin-top:10px; }}
+        </style>
+      </head>
+      <body>
+        <h2>Панель публикаций</h2>
+        <a class="btn" href="{base}">Опубликовать сейчас (AUTO)</a>
+        <a class="btn" href="{base}&slot=morning">Утро</a>
+        <a class="btn" href="{base}&slot=day">День</a>
+        <a class="btn" href="{base}&slot=evening">Вечер</a>
+        <div class="hint">Если кнопка нажата — в логах появится “MANUAL…”, пост уйдёт в канал.</div>
+      </body>
+    </html>
+    """
+    return (html, 200, {"Content-Type": "text/html; charset=utf-8"})
 
 
 # =========================
 # SCHEDULER
 # =========================
 def random_time_in_range(start_hour: int, end_hour_exclusive: int) -> str:
+    """
+    Возвращает HH:MM в диапазоне [start_hour, end_hour_exclusive)
+    Пример: (13,14) => 13:00–13:59
+    """
     h = random.randint(start_hour, end_hour_exclusive - 1)
     m = random.randint(0, 59)
     return f"{h:02d}:{m:02d}"
@@ -283,8 +330,11 @@ def schedule_daily_posts() -> None:
     schedule.clear("day")
     schedule.clear("evening")
 
+    # Утро: 08:00–08:59
     t_morning = random_time_in_range(8, 9)
-    t_day = "15:15"          # фикс
+    # ✅ День: 13:00–13:59 (как ты попросил)
+    t_day = random_time_in_range(13, 14)
+    # Вечер: 18:00–18:59
     t_evening = random_time_in_range(18, 19)
 
     schedule.every().day.at(t_morning).do(lambda: create_and_send_post("morning", t_morning)).tag("morning")
