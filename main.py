@@ -36,8 +36,10 @@ load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
 OPENAI_MODEL_CHAT = os.getenv("OPENAI_MODEL_CHAT", "gpt-4o-mini")
 OPENAI_MODEL_IMAGE = os.getenv("OPENAI_MODEL_IMAGE", "gpt-image-1")
+
 MANUAL_PUBLISH_TOKEN = os.getenv("MANUAL_PUBLISH_TOKEN", "")
 
 LOG_FILE = "posts_log.json"
@@ -79,7 +81,7 @@ def log_post(slot: str, time_planned: str, time_sent: str, tg_status: int, tg_bo
         "time_planned": time_planned,
         "time_sent": time_sent,
         "tg_status": tg_status,
-        "tg_body": tg_body[:5000],
+        "tg_body": tg_body[:3000],
         "manual": str(time_planned).startswith("manual"),
     })
     save_logs(logs)
@@ -110,10 +112,16 @@ def generate_post_text(slot: str) -> str:
     r = client.chat.completions.create(
         model=OPENAI_MODEL_CHAT,
         messages=[
-            {"role": "system", "content": "Ты эзотерический автор, пишешь мягко и красиво."},
-            {"role": "user", "content": f"{get_weekday_topic()}. Объём 500–700 символов."},
+            {
+                "role": "system",
+                "content": "Ты эзотерический автор Telegram-канала о снах. Пиши мягко, красиво, без страшилок."
+            },
+            {
+                "role": "user",
+                "content": f"{get_weekday_topic()}. Объём 500–700 символов. 1–2 эмодзи."
+            },
         ],
-        max_tokens=600,
+        max_tokens=700,
         temperature=0.9,
     )
 
@@ -122,7 +130,7 @@ def generate_post_text(slot: str) -> str:
     footer = "\n\n—\nНапиши свой сон 👉 @whatdreams_bot 🌙"
     full = text + footer
 
-    # Telegram caption limit ~1024
+    # лимит caption в Telegram ≈ 1024
     if len(full) > 1024:
         full = full[:1020] + "…"
 
@@ -130,33 +138,39 @@ def generate_post_text(slot: str) -> str:
 
 
 # =========================
-# IMAGE GENERATION (B64 -> BYTES)
+# IMAGE GENERATION (OpenAI GPT-Image-1)
 # =========================
 def generate_image_bytes(slot: str) -> bytes:
     """
-    Надежный способ: просим OpenAI вернуть картинку base64,
-    декодируем и отправляем в Telegram как файл.
+    Для gpt-image-1:
+    b64_json возвращается по умолчанию, response_format НЕ используем.
     """
-    print("[GEN] Генерируем изображение (b64)...", flush=True)
+    print("[GEN] Генерируем изображение (gpt-image-1)...", flush=True)
 
     img = client.images.generate(
         model=OPENAI_MODEL_IMAGE,
-        prompt="Мистическая иллюстрация сна, луна, символы, без текста. Атмосферно, красиво.",
+        prompt="Мистическая иллюстрация сна, луна, символы, мягкий свет, без текста.",
         size="1024x1024",
-        response_format="b64_json",
     )
 
-    # В ответе будет b64_json
-    b64 = img.data[0].b64_json
-    if not b64:
-        raise ValueError("OpenAI images.generate вернул пустой b64_json")
+    data0 = img.data[0]
 
-    image_bytes = base64.b64decode(b64)
-    if not image_bytes:
-        raise ValueError("Декодированное изображение пустое")
+    # основной путь — base64
+    b64 = getattr(data0, "b64_json", None)
+    if b64:
+        image_bytes = base64.b64decode(b64)
+        print(f"[GEN] Картинка получена из b64, bytes={len(image_bytes)}", flush=True)
+        return image_bytes
 
-    print(f"[GEN] Картинка готова, bytes={len(image_bytes)}", flush=True)
-    return image_bytes
+    # fallback — если вдруг вернулся url
+    url = getattr(data0, "url", None)
+    if url:
+        print("[GEN] b64 отсутствует, fallback на url", flush=True)
+        r = requests.get(url, timeout=90)
+        r.raise_for_status()
+        return r.content
+
+    raise ValueError("OpenAI image response не содержит ни b64_json, ни url")
 
 
 # =========================
@@ -164,8 +178,8 @@ def generate_image_bytes(slot: str) -> bytes:
 # =========================
 def send_photo_to_telegram(image_bytes: bytes, caption: str) -> requests.Response:
     print(f"[TG] Отправка в канал {TELEGRAM_CHANNEL_ID}", flush=True)
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
 
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
     files = {"photo": ("image.png", image_bytes)}
     data = {"chat_id": TELEGRAM_CHANNEL_ID, "caption": caption}
 
@@ -231,14 +245,12 @@ def publish_now():
 
     print(f"[MANUAL] Trigger slot={slot}", flush=True)
 
-    def run():
-        try:
-            create_and_send_post(slot, f"manual-{datetime.now().strftime('%H:%M')}")
-        except Exception as e:
-            print("[MANUAL ERROR]", repr(e), flush=True)
-            print(traceback.format_exc(), flush=True)
+    threading.Thread(
+        target=create_and_send_post,
+        args=(slot, f"manual-{datetime.now().strftime('%H:%M')}"),
+        daemon=True
+    ).start()
 
-    threading.Thread(target=run, daemon=True).start()
     return f"started {slot}", 200
 
 
